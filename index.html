@@ -54,7 +54,7 @@
     if(!myName){ myName = prompt("Ваше имя:"); localStorage.setItem("name", myName); }
     document.getElementById("myName").innerText = myName;
     let currentChat = "all", typingTimeout;
-    const WS_URL = "wss://chat.onrender.com";
+    const WS_URL = "wss://chat-dk8e.onrender.com";
     function connect(){
         ws = new WebSocket(WS_URL);
         ws.onopen = () => ws.send(JSON.stringify({type:"register", username:myName}));
