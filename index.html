@@ -29,18 +29,28 @@
         .input-area { display: flex; gap: 10px; padding: 15px; background: #17212b; border-top: 1px solid #242f3d; }
         .input-area input { flex: 1; padding: 10px 15px; background: #242f3d; border: none; border-radius: 20px; color: white; outline: none; }
         .input-area button { background: #2b5270; color: white; border: none; padding: 10px 20px; border-radius: 20px; cursor: pointer; }
+        .status-badge { font-size: 12px; padding: 4px 8px; border-radius: 12px; margin-left: 10px; }
+        .status-connected { background: #2e7d32; color: white; }
+        .status-connecting { background: #ed6c02; color: white; }
+        .status-disconnected { background: #d32f2f; color: white; }
         @media (max-width: 700px) { .sidebar { width: 80px; } .user-name-small, .chats-header { display: none; } }
     </style>
 </head>
 <body>
 <div class="app">
     <div class="sidebar">
-        <div class="user-info"><div class="user-name" id="myName">...</div><div class="online-status">● Онлайн</div></div>
+        <div class="user-info">
+            <div class="user-name" id="myName">...</div>
+            <div class="online-status">● Онлайн</div>
+        </div>
         <div class="chats-header">Чаты</div>
         <div class="users-list" id="usersList"></div>
     </div>
     <div class="chat-area">
-        <div class="chat-header" id="chatHeader">Общий чат</div>
+        <div class="chat-header" id="chatHeader">
+            Общий чат
+            <span id="connectionStatus" class="status-badge status-connecting">🔌 Подключение...</span>
+        </div>
         <div class="messages" id="messages"></div>
         <div class="typing-indicator" id="typingIndicator" style="display:none"></div>
         <div class="input-area">
@@ -50,52 +60,192 @@
     </div>
 </div>
 <script>
-    let ws, myName = localStorage.getItem("name");
+    let ws = null;
+    let myName = localStorage.getItem("name");
     if(!myName){ myName = prompt("Ваше имя:"); localStorage.setItem("name", myName); }
     document.getElementById("myName").innerText = myName;
-    let currentChat = "all", typingTimeout;
-    const WS_URL = "wss://chat-dk8e.onrender.com";
-    function connect(){
-        ws = new WebSocket(WS_URL);
-        ws.onopen = () => ws.send(JSON.stringify({type:"register", username:myName}));
-        ws.onmessage = (e) => {
-            let data = JSON.parse(e.data);
-            if(data.type === "users_list") updateUsers(data.users);
-            else if(data.type === "public" && (currentChat==="all"||currentChat===data.from)) addMsg(data.from, data.text, false, data.time);
-            else if(data.type === "private" && (currentChat===data.from||currentChat===myName)) addMsg(data.from, data.text, false, data.time);
-            else if(data.type === "typing" && currentChat===data.from) showTyping(data.from);
-            else if(data.type === "info") addInfo(data.text);
-        };
-        ws.onclose = () => setTimeout(connect, 3000);
-        ws.onerror = (err) => console.log("WebSocket ошибка:", err);
+    
+    let currentChat = "all";
+    let typingTimeout = null;
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
+    
+    // WebSocket адрес
+    const WS_URL = "wss://chat.onrender.com";
+    
+    function updateConnectionStatus(status, text) {
+        const badge = document.getElementById("connectionStatus");
+        badge.innerText = text;
+        badge.className = "status-badge status-" + status;
     }
-    function updateUsers(users){
+    
+    function connect() {
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+            console.log("WebSocket уже открыт или открывается");
+            return;
+        }
+        
+        updateConnectionStatus("connecting", "🔌 Подключение...");
+        console.log("Подключение к " + WS_URL);
+        
+        try {
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                console.log("✅ WebSocket открыт");
+                reconnectAttempts = 0;
+                updateConnectionStatus("connected", "✅ Соединение установлено");
+                ws.send(JSON.stringify({type: "register", username: myName}));
+            };
+            
+            ws.onmessage = (e) => {
+                try {
+                    let data = JSON.parse(e.data);
+                    console.log("Получено:", data);
+                    
+                    if(data.type === "users_list") {
+                        updateUsers(data.users);
+                    } else if(data.type === "public" && (currentChat === "all" || currentChat === data.from)) {
+                        addMsg(data.from, data.text, false, data.time);
+                    } else if(data.type === "private" && (currentChat === data.from || currentChat === myName)) {
+                        addMsg(data.from, data.text, false, data.time);
+                    } else if(data.type === "typing" && currentChat === data.from) {
+                        showTyping(data.from);
+                    } else if(data.type === "info") {
+                        addInfo(data.text);
+                    }
+                } catch(err) {
+                    console.error("Ошибка парсинга сообщения:", err);
+                }
+            };
+            
+            ws.onclose = (event) => {
+                console.log("❌ WebSocket закрыт, код:", event.code, "причина:", event.reason);
+                updateConnectionStatus("disconnected", "🔴 Соединение потеряно");
+                addInfo("🔴 Потеря связи. Переподключение...");
+                
+                // Автоматическое переподключение с увеличивающейся задержкой
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                let delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                reconnectAttempts++;
+                reconnectTimer = setTimeout(() => {
+                    console.log(`🔄 Попытка переподключения ${reconnectAttempts}...`);
+                    connect();
+                }, delay);
+            };
+            
+            ws.onerror = (err) => {
+                console.error("WebSocket ошибка:", err);
+                updateConnectionStatus("disconnected", "⚠️ Ошибка соединения");
+            };
+        } catch(err) {
+            console.error("Ошибка создания WebSocket:", err);
+            updateConnectionStatus("disconnected", "❌ Ошибка создания соединения");
+        }
+    }
+    
+    function sendMessage() {
+        let inp = document.getElementById("messageInput");
+        let txt = inp.value.trim();
+        
+        if (!txt) return;
+        
+        // Проверяем состояние WebSocket
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            addInfo("❌ Нет соединения с сервером. Подключаемся...");
+            connect();
+            return;
+        }
+        
+        try {
+            let message = {
+                type: currentChat === "all" ? "public" : "private",
+                text: txt
+            };
+            if (currentChat !== "all") {
+                message.to = currentChat;
+            }
+            ws.send(JSON.stringify(message));
+            addMsg(myName, txt, true, new Date().toLocaleTimeString());
+            inp.value = "";
+        } catch(err) {
+            console.error("Ошибка отправки:", err);
+            addInfo("❌ Ошибка отправки сообщения");
+            connect();
+        }
+    }
+    
+    function sendTyping() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (currentChat !== "all") {
+            try {
+                ws.send(JSON.stringify({type: "typing", to: currentChat}));
+            } catch(err) {
+                console.error("Ошибка отправки статуса печати:", err);
+            }
+        }
+    }
+    
+    function updateUsers(users) {
         let container = document.getElementById("usersList");
         container.innerHTML = '<div style="padding:12px 20px;color:#7e8c9e;cursor:pointer" onclick="selectChat(\'all\')">📢 Общий чат</div>';
-        users.filter(u=>u!==myName).forEach(u=>{
+        users.filter(u => u !== myName).forEach(u => {
             let div = document.createElement("div");
-            div.className = "user-item" + (currentChat===u?" active":"");
+            div.className = "user-item" + (currentChat === u ? " active" : "");
             div.onclick = () => selectChat(u);
             div.innerHTML = `<div class="user-name-small">${escape(u)}</div>`;
             container.appendChild(div);
         });
     }
-    function selectChat(chat){ currentChat=chat; document.getElementById("chatHeader").innerHTML=chat==="all"?"📢 Общий чат":`💬 ${chat}`; document.getElementById("messages").innerHTML=""; }
-    function addMsg(from,text,self,time){
+    
+    function selectChat(chat) {
+        currentChat = chat;
+        document.getElementById("chatHeader").innerHTML = chat === "all" ? "📢 Общий чат" : `💬 ${chat}`;
+        document.getElementById("messages").innerHTML = "";
+        document.querySelectorAll(".user-item").forEach(el => el.classList.remove("active"));
+    }
+    
+    function addMsg(from, text, self, time) {
         let div = document.createElement("div");
-        div.className = "message " + (self||from===myName?"self":"other");
-        div.innerHTML = (self||from===myName?"":`<b>${escape(from)}</b><br>`)+escape(text)+`<div class="message-info">${time||""}</div>`;
+        div.className = "message " + (self || from === myName ? "self" : "other");
+        div.innerHTML = (self || from === myName ? "" : `<b>${escape(from)}</b><br>`) + escape(text) + `<div class="message-info">${time || ""}</div>`;
         document.getElementById("messages").appendChild(div);
         div.scrollIntoView();
     }
-    function addInfo(text){ let d=document.createElement("div"); d.style.cssText="text-align:center;color:#7e8c9e;font-size:12px;margin:5px 0"; d.innerText=text; document.getElementById("messages").appendChild(d); }
-    function showTyping(from){ let ind=document.getElementById("typingIndicator"); ind.innerText=from+" печатает..."; ind.style.display="block"; clearTimeout(typingTimeout); typingTimeout=setTimeout(()=>ind.style.display="none",2000); }
-    function sendMessage(){ let inp=document.getElementById("messageInput"), txt=inp.value.trim(); if(!txt||!ws) return; ws.send(JSON.stringify({type:currentChat==="all"?"public":"private", to:currentChat==="all"?undefined:currentChat, text:txt})); addMsg(myName,txt,true,new Date().toLocaleTimeString()); inp.value=""; }
-    function sendTyping(){ if(currentChat!=="all"&&ws) ws.send(JSON.stringify({type:"typing",to:currentChat})); }
-    document.getElementById("messageInput").addEventListener("input",()=>sendTyping());
-    document.getElementById("messageInput").addEventListener("keypress",e=>{if(e.key==="Enter")sendMessage();});
-    function escape(s){ return s.replace(/[&<>]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m])); }
+    
+    function addInfo(text) {
+        let d = document.createElement("div");
+        d.style.cssText = "text-align:center;color:#7e8c9e;font-size:12px;margin:5px 0";
+        d.innerText = text;
+        document.getElementById("messages").appendChild(d);
+        setTimeout(() => d.remove(), 5000);
+    }
+    
+    function showTyping(from) {
+        let ind = document.getElementById("typingIndicator");
+        ind.innerText = from + " печатает...";
+        ind.style.display = "block";
+        clearTimeout(typingTimeout);
+        typingTimeout = setTimeout(() => ind.style.display = "none", 2000);
+    }
+    
+    document.getElementById("messageInput").addEventListener("input", () => sendTyping());
+    document.getElementById("messageInput").addEventListener("keypress", e => { if (e.key === "Enter") sendMessage(); });
+    
+    function escape(s) {
+        return s.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
+    }
+    
+    // Запускаем подключение
     connect();
+    
+    // Периодическая проверка соединения (каждые 30 секунд)
+    setInterval(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            console.log("Проверка: соединение потеряно, переподключаемся...");
+            connect();
+        }
+    }, 30000);
 </script>
 </body>
 </html>
