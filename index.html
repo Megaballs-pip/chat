@@ -67,6 +67,7 @@
             else if(data.type === "info") addInfo(data.text);
         };
         ws.onclose = () => setTimeout(connect, 3000);
+        ws.onerror = (err) => console.log("WebSocket ошибка:", err);
     }
     function updateUsers(users){
         let container = document.getElementById("usersList");
